@@ -15,6 +15,8 @@ class ZHM5ItemWeapon;
 // Trainer47 - offline/story-mode helper menu for HITMAN World of Assassination.
 // v0.2.1: Bullet Time with verified offline gate, mission-unload restore and an
 //       optional activation mode driven by 47's weapon-fire requests.
+// v0.2.2: Optional infinite pistol reserve ammo (normal reloading kept), with a
+//       runtime layout self-check that fails closed.
 class Trainer47 : public IPluginInterface {
 public:
     ~Trainer47() override;
@@ -45,6 +47,7 @@ private:
     void RestoreNormalSpeed();
     void ResetInputState();
     void Toast(const std::string& p_Message);
+    void UpdateInfiniteAmmo(float p_RealDelta);
 
     void LoadSettings();
     void SaveSettings();
@@ -60,6 +63,7 @@ private:
     bool m_ShowIndicator = true;
     bool m_ControllerHotkeys = true;
     int m_ModifierIndex = 0;
+    bool m_InfinitePistolAmmo = false; // off by default; reserve ammo only
 
     // --- Runtime state (guarded by m_StateMutex) ---
     std::mutex m_StateMutex;
@@ -84,6 +88,12 @@ private:
     uint16_t m_PrevButtons = 0;
     std::string m_ToastText;
     float m_ToastTimeLeft = 0.f;
+
+    // Infinite pistol ammo runtime state.
+    float m_AmmoTimer = 0.f;
+    bool m_AmmoBlocked = false;        // layout/verify failure: off until game restart
+    std::string m_AmmoStatus = "Off";
+    uint32_t m_AmmoTopUps = 0;
 
     // Set from the weapon hook without taking the mutex.
     std::atomic<bool> m_PlayerShotPending { false };

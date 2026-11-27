@@ -4,11 +4,15 @@
 #include "IconsMaterialDesign.h"
 
 #include "Hooks.h"
+#include "Functions.h"
+#include "Logging.h"
 
 #include <Glacier/ZGameLoopManager.h>
 #include <Glacier/ZGameTime.h>
 #include <Glacier/ZHitman5.h>
 #include <Glacier/ZItem.h>
+#include <Glacier/ZInventory.h>
+#include <Glacier/Enums.h>
 #include <Glacier/ZOnlineManager.h>
 
 #include <Windows.h>
@@ -73,6 +77,125 @@ namespace {
     }
 
     constexpr const char c_Section[] = "bullet_time"; // array, not pointer: ZString only converts from char arrays
+    constexpr const char c_AmmoSection[] = "ammo";      // same reason
+
+    // -----------------------------------------------------------------------
+    // Infinite pistol ammo (v0.2.2)
+    //
+    // Only verified SDK interfaces are used:
+    //   - ZHitman5::m_pCharacter -> ZCharacter::m_rSubcontrollerContainer
+    //     -> m_aReferencedControllers                       (SDK headers)
+    //   - ZEntityRef::QueryInterface<ZCharacterSubcontrollerInventory>()
+    //     (game type registry, instead of Player's hard-coded controller [6])
+    //   - Functions::ZCharacterSubcontrollerInventory_GetAmmoInPocketForType
+    //     (the game's own getter, used to validate the SDK struct layout)
+    //   - TCheatProtect<uint32>::Get / Set                  (SDK)
+    // Nothing is written unless the game's getter and the SDK struct agree for
+    // every ammo type, and every write is read back through the game's getter.
+    // -----------------------------------------------------------------------
+    enum AmmoResult : int {
+        Ammo_Ok = 0,
+        Ammo_NoCharacter,
+        Ammo_NoInventory,
+        Ammo_LayoutMismatch,
+        Ammo_VerifyFailed,
+        Ammo_Exception,
+    };
+
+    struct AmmoProbe {
+        ZHitman5* m_Hitman = nullptr;
+        bool m_Write = false;
+        int m_Result = Ammo_Exception;
+        uint32_t m_Game[Trainer47Logic::c_AmmoTypeCount] {};
+        uint32_t m_Struct[Trainer47Logic::c_AmmoTypeCount] {};
+        uint32_t m_ToppedUp = 0;
+    };
+
+    void ProbeAmmo(void* p_Ctx) {
+        auto* s_Probe = static_cast<AmmoProbe*>(p_Ctx);
+
+        auto* s_Character = s_Probe->m_Hitman->m_pCharacter.m_pInterfaceRef;
+        if (!s_Character) {
+            s_Probe->m_Result = Ammo_NoCharacter;
+            return;
+        }
+
+        auto* s_Container = s_Character->m_rSubcontrollerContainer.m_pInterfaceRef;
+        if (!s_Container) {
+            s_Probe->m_Result = Ammo_NoInventory;
+            return;
+        }
+
+        ZCharacterSubcontrollerInventory* s_Inventory = nullptr;
+        for (auto& s_Controller : s_Container->m_aReferencedControllers) {
+            s_Inventory = s_Controller.m_entityRef.QueryInterface<ZCharacterSubcontrollerInventory>();
+            if (s_Inventory) break;
+        }
+
+        if (!s_Inventory) {
+            s_Probe->m_Result = Ammo_NoInventory;
+            return;
+        }
+
+        for (int i = 0; i < Trainer47Logic::c_AmmoTypeCount; ++i) {
+            s_Probe->m_Game[i] = Functions::ZCharacterSubcontrollerInventory_GetAmmoInPocketForType->Call(
+                s_Inventory, static_cast<eAmmoType>(i)
+            );
+            s_Probe->m_Struct[i] = s_Inventory->m_nAmmoInPocket[i].Get();
+        }
+
+        if (!Trainer47Logic::LayoutMatches(s_Probe->m_Game, s_Probe->m_Struct, Trainer47Logic::c_AmmoTypeCount)) {
+            s_Probe->m_Result = Ammo_LayoutMismatch;
+            return;
+        }
+
+        if (s_Probe->m_Write) {
+            const int s_Types[] = { Trainer47Logic::c_AmmoGun, Trainer47Logic::c_AmmoLightPistol };
+
+            for (const int s_Type : s_Types) {
+                const uint32_t s_Max = s_Type == Trainer47Logic::c_AmmoGun
+                                           ? s_Inventory->m_nMaxGunAmmo
+                                           : s_Inventory->m_nMaxPistolLightAmmo;
+                const uint32_t s_Target = Trainer47Logic::AmmoTarget(s_Max);
+
+                if (!Trainer47Logic::NeedsTopUp(s_Probe->m_Game[s_Type], s_Target)) {
+                    continue;
+                }
+
+                s_Inventory->m_nAmmoInPocket[s_Type].Set(s_Target);
+
+                const uint32_t s_After = Functions::ZCharacterSubcontrollerInventory_GetAmmoInPocketForType->Call(
+                    s_Inventory, static_cast<eAmmoType>(s_Type)
+                );
+
+                if (s_After != s_Target) {
+                    s_Probe->m_Result = Ammo_VerifyFailed;
+                    return;
+                }
+
+                ++s_Probe->m_ToppedUp;
+            }
+        }
+
+        s_Probe->m_Result = Ammo_Ok;
+    }
+
+    // Structured exception guard: an access violation from a bad layout turns
+    // into a clean "disabled" state instead of crashing the game.
+    bool RunGuarded(void (*p_Fn)(void*), void* p_Ctx) {
+#ifdef _MSC_VER
+        __try {
+            p_Fn(p_Ctx);
+            return true;
+        }
+        __except (EXCEPTION_EXECUTE_HANDLER) {
+            return false;
+        }
+#else
+        p_Fn(p_Ctx);
+        return true;
+#endif
+    }
 }
 
 Trainer47::~Trainer47() {
@@ -290,6 +413,7 @@ void Trainer47::OnFrameUpdate(const SGameUpdateEvent& p_UpdateEvent) {
     }
     if (!m_PadWasConnected && pad.m_Connected) m_WaitForRelease = true;
     HandleHotkeys(pad);
+    UpdateInfiniteAmmo(delta);
 
     const bool wasAimHeld = m_AimHeld;
     m_AimHeld = IsAimHeld(pad);
@@ -321,6 +445,66 @@ void Trainer47::OnFrameUpdate(const SGameUpdateEvent& p_UpdateEvent) {
 }
 
 // ---------------------------------------------------------------------------
+// Infinite pistol ammo
+// Runs on the game thread from OnFrameUpdate, only after the offline, focus and
+// local-player gates have passed.
+// ---------------------------------------------------------------------------
+void Trainer47::UpdateInfiniteAmmo(float p_RealDelta) {
+    if (!m_InfinitePistolAmmo) {
+        m_AmmoStatus = m_AmmoBlocked ? "Blocked (layout check failed)" : "Off";
+        return;
+    }
+
+    if (m_AmmoBlocked) {
+        return;
+    }
+
+    m_AmmoTimer -= p_RealDelta;
+    if (m_AmmoTimer > 0.f) {
+        return;
+    }
+    m_AmmoTimer = 0.5f;
+
+    const auto s_LocalHitman = SDK()->GetLocalPlayer();
+    if (!s_LocalHitman) {
+        m_AmmoStatus = "Waiting for player";
+        return;
+    }
+
+    AmmoProbe s_Probe;
+    s_Probe.m_Hitman = s_LocalHitman.m_pInterfaceRef;
+    s_Probe.m_Write = true;
+
+    if (!RunGuarded(&ProbeAmmo, &s_Probe)) {
+        s_Probe.m_Result = Ammo_Exception;
+    }
+
+    switch (s_Probe.m_Result) {
+        case Ammo_Ok:
+            m_AmmoTopUps += s_Probe.m_ToppedUp;
+            m_AmmoStatus = "Active - pistol reserve " + std::to_string(s_Probe.m_Game[Trainer47Logic::c_AmmoGun]) +
+                           (s_Probe.m_ToppedUp ? " (topped up)" : "");
+            break;
+        case Ammo_NoCharacter:
+        case Ammo_NoInventory:
+            m_AmmoStatus = "Waiting for inventory";
+            break;
+        default: {
+            m_AmmoBlocked = true;
+            const char* s_Reason = s_Probe.m_Result == Ammo_LayoutMismatch
+                                       ? "game getter and SDK layout disagree"
+                                       : s_Probe.m_Result == Ammo_VerifyFailed
+                                       ? "write did not read back"
+                                       : "memory access exception";
+            m_AmmoStatus = std::string("Blocked: ") + s_Reason;
+            Toast("Infinite ammo disabled - layout check failed");
+            Logger::Warn("[Trainer47] Infinite pistol ammo disabled for this session: {}.", s_Reason);
+            break;
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Hooks
 // ---------------------------------------------------------------------------
 DEFINE_PLUGIN_DETOUR(Trainer47, void, OnClearScene, ZEntitySceneContext* th, bool p_FullyUnloadScene) {
@@ -329,6 +513,7 @@ DEFINE_PLUGIN_DETOUR(Trainer47, void, OnClearScene, ZEntitySceneContext* th, boo
         RestoreNormalSpeed();
         ResetInputState();
         m_WaitForRelease = true;
+        m_AmmoTimer = 1.0f; // let the next scene settle before the first ammo check
     }
     m_PlayerShotPending = false;
 
@@ -484,6 +669,21 @@ void Trainer47::OnDrawUI(bool p_HasFocus) {
         const PadState s_Pad = ReadPad();
         ImGui::Text("Controller: %s", s_Pad.m_Connected ? "connected" : "not detected (turn on Steam Input?)");
 
+        ImGui::SeparatorText("Infinite pistol ammo");
+
+        s_Changed |= ImGui::Checkbox("Infinite pistol reserve ammo (you still reload)", &m_InfinitePistolAmmo);
+        ImGui::TextDisabled("Status: %s", m_AmmoStatus.c_str());
+        if (m_AmmoTopUps > 0) {
+            ImGui::TextDisabled("Top-ups this session: %u", m_AmmoTopUps);
+        }
+        if (m_AmmoBlocked) {
+            ImGui::TextWrapped(
+                "Disabled until the game restarts: the SDK's inventory layout doesn't match this game build, "
+                "so nothing was written. Wait for an SDK update."
+            );
+        }
+        ImGui::TextWrapped("Turn off the Player mod's Infinite ammo and No reload while using this.");
+
         if (s_Changed) {
             SaveSettings();
         }
@@ -508,6 +708,7 @@ void Trainer47::LoadSettings() {
     m_ShowIndicator = GetSettingBool(c_Section, "show_indicator", m_ShowIndicator);
     m_ControllerHotkeys = GetSettingBool(c_Section, "controller_hotkeys", m_ControllerHotkeys);
     m_ModifierIndex = static_cast<int>(GetSettingInt(c_Section, "hotkey_modifier", m_ModifierIndex));
+    m_InfinitePistolAmmo = GetSettingBool(c_AmmoSection, "infinite_pistol_ammo", m_InfinitePistolAmmo);
 
     m_SlowSpeed = Trainer47Logic::Bounded(m_SlowSpeed, 0.25f, 0.05f, 0.9f);
     m_EaseInSeconds = Trainer47Logic::Bounded(m_EaseInSeconds, 0.12f, 0.f, 1.f);
@@ -528,6 +729,7 @@ void Trainer47::SaveSettings() {
     SetSettingBool(c_Section, "show_indicator", m_ShowIndicator);
     SetSettingBool(c_Section, "controller_hotkeys", m_ControllerHotkeys);
     SetSettingInt(c_Section, "hotkey_modifier", m_ModifierIndex);
+    SetSettingBool(c_AmmoSection, "infinite_pistol_ammo", m_InfinitePistolAmmo);
 }
 
 DEFINE_ZHM_PLUGIN(Trainer47);

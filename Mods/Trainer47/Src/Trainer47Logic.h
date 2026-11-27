@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <cstdint>
 
 namespace Trainer47Logic {
 inline float Bounded(float value, float fallback, float minimum, float maximum) {
@@ -64,6 +65,41 @@ inline bool WantSlow(int mode, bool aimHeld, bool shotLatched) {
 // it is false while the game is still connecting.
 inline bool IsOfflineState(int state) {
     return state == 2 || state == 4;
+}
+
+// ---------------------------------------------------------------------------
+// v0.2.2 infinite pistol ammo (reserve ammo only; the magazine is never touched,
+// so normal reloading is preserved).
+// ---------------------------------------------------------------------------
+
+// eAmmoType values from the SDK's Enums.h.
+constexpr int c_AmmoGun = 0;          // eAmmoGun: standard + silenced pistols
+constexpr int c_AmmoLightPistol = 10; // eAmmoLightPistol
+constexpr int c_AmmoTypeCount = 17;   // eUnknownAmmoType: size of m_nAmmoInPocket
+
+inline bool IsPistolAmmo(int type) {
+    return type == c_AmmoGun || type == c_AmmoLightPistol;
+}
+
+// Reserve target: the inventory's own max for that ammo type when it looks sane,
+// otherwise a conservative fallback.
+inline uint32_t AmmoTarget(uint32_t maxFromInventory) {
+    return (maxFromInventory >= 1 && maxFromInventory <= 500) ? maxFromInventory : 60u;
+}
+
+// Only ever raise reserve ammo, never lower it.
+inline bool NeedsTopUp(uint32_t current, uint32_t target) {
+    return current < target;
+}
+
+// The SDK struct layout is trusted only if the game's own getter and our decoded
+// struct read agree for every ammo type. Any difference means the game build and
+// the SDK headers disagree, so nothing may be written.
+inline bool LayoutMatches(const uint32_t* gameValues, const uint32_t* structValues, int count) {
+    if (!gameValues || !structValues || count <= 0) return false;
+    for (int i = 0; i < count; ++i)
+        if (gameValues[i] != structValues[i]) return false;
+    return true;
 }
 
 // Bullet time may only run when every gate is open. Unknown online state fails closed.
