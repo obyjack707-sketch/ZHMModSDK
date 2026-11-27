@@ -57,5 +57,22 @@ int main() {
     assert(IsOfflineState(2));
     assert(IsOfflineState(4));
     for (int st : {0, 1, 3, 5, 6, 15, 20, 24, 30, 31, 32, -1}) assert(!IsOfflineState(st));
+    // v0.2.2 infinite pistol ammo
+    assert(IsPistolAmmo(0) && IsPistolAmmo(10));
+    for (int t : {1, 2, 3, 5, 8, 9, 11, 15, 16, 17, -1}) assert(!IsPistolAmmo(t));
+    assert(AmmoTarget(48) == 48u);
+    assert(AmmoTarget(0) == 60u);
+    assert(AmmoTarget(501) == 60u);
+    assert(AmmoTarget(0xFFFFFFF0u) == 60u); // garbage max from a bad layout
+    assert(NeedsTopUp(0, 48) && NeedsTopUp(47, 48));
+    assert(!NeedsTopUp(48, 48) && !NeedsTopUp(200, 48)); // never lowers
+    {
+        uint32_t g[c_AmmoTypeCount] = {}, o[c_AmmoTypeCount] = {};
+        g[0] = o[0] = 24; g[10] = o[10] = 12;
+        assert(LayoutMatches(g, o, c_AmmoTypeCount));
+        o[16] = 1; assert(!LayoutMatches(g, o, c_AmmoTypeCount)); // any mismatch blocks writes
+        assert(!LayoutMatches(nullptr, o, c_AmmoTypeCount));
+        assert(!LayoutMatches(g, o, 0));
+    }
     std::cout << "All Trainer47 logic tests passed\n";
 }
