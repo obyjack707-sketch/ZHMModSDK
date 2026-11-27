@@ -72,7 +72,7 @@ namespace {
         return pid == GetCurrentProcessId();
     }
 
-    constexpr const char* c_Section = "bullet_time";
+    constexpr const char c_Section[] = "bullet_time"; // array, not pointer: ZString only converts from char arrays
 }
 
 Trainer47::~Trainer47() {
