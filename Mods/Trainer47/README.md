@@ -1,4 +1,4 @@
-# Trainer47 v0.2.1
+# Trainer47 v0.2.2
 
 Offline story-mode bullet time for HITMAN World of Assassination, built as a ZHMModSDK mod.
 
@@ -16,6 +16,30 @@ so the loader and the mod DLL come from the same revision.
 - **Controller shortcuts** (hold LB by default): D-pad Up toggle, Left/Right slower/faster,
   Down cycles 50/25/10/5%. The hold button can be changed.
 - **Menu**: press `~`, then click TRAINER 47. Settings save to `mods.ini` `[bullet_time]`.
+
+## v0.2.2: infinite pistol ammo (off by default)
+
+Menu: TRAINER 47 > Infinite pistol ammo. Keeps 47's **reserve** pistol ammo (`eAmmoGun`, which
+covers the silenced pistol, plus `eAmmoLightPistol`) topped up to the inventory's own max. The
+magazine is never touched, so you still reload normally. Offline-only: it runs from the same
+gated frame update as bullet time (explicit offline state + live local player + game focused).
+
+Why not the Player mod's Infinite ammo / No reload: both crash on the last bullet on the
+27 Nov game build. Both write game memory through hard-coded layouts: No reload casts
+`m_aReferencedControllers[6]` to the inventory with no type check, and Infinite ammo spawns and
+writes a `ZHM5CrippleBox`. The game files were updated 27 Nov 05:16 and the SDK is from 26 Nov.
+The loader log reports `Could not find pattern ... Game might have been updated`. Turn both
+Player options off while using this.
+
+Safety, every 0.5 s while enabled:
+1. Inventory found with `ZEntityRef::QueryInterface<ZCharacterSubcontrollerInventory>()` (game
+   type registry), not a fixed index.
+2. Layout self-check: the game's own `Functions::ZCharacterSubcontrollerInventory_GetAmmoInPocketForType`
+   must equal the SDK struct's decoded `m_nAmmoInPocket[i]` for **all 17** ammo types.
+3. Write with the SDK's `TCheatProtect::Set`, then read back through the game getter. It must match.
+4. The whole probe runs under an SEH guard (`__try/__except`).
+Any mismatch, failed read-back or exception blocks the feature until restart (status + toast +
+log line). Nothing is written. Only raises reserve ammo, never lowers it.
 
 ## Safety gates (all verified against SDK source)
 
