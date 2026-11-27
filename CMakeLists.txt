@@ -66,6 +66,7 @@ set(MODS
         World
         FreelancerSeeder
         QuickSave
+        Trainer47
 )
 
 foreach (MOD IN LISTS MODS)
